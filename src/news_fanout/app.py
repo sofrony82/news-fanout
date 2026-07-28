@@ -7,10 +7,11 @@ from fastapi import FastAPI
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from news_fanout.adapters import LoggingPushSender, RateLimiter, StubArticleSource, StubTopicClassifier
-from news_fanout.api import health_router, v1_router
+from news_fanout.api import health_router, internal_router, v1_router
 from news_fanout.config import AppSettings, Role, get_app_settings
 from news_fanout.db import connect
 from news_fanout.dedup import PushDedupStore, create_redis_client
+from news_fanout.migrations import apply_schema
 from news_fanout.workers import ClassifierWorker, DigestDispatcher, IngestJob, PushCoordinator, PushWorker
 
 logger = logging.getLogger(__name__)
@@ -23,7 +24,8 @@ def _background_coroutines(app: FastAPI) -> list[asyncio.Task[None]]:
     tasks: list[asyncio.Task[None]] = []
 
     if role in (Role.INGEST, Role.ALL):
-        ingest = IngestJob(settings.ingest, session_maker, StubArticleSource(settings.ingest.articles_per_page))
+        source = StubArticleSource(settings.ingest.articles_per_page, settings.ingest.stub_max_page_id)
+        ingest = IngestJob(settings.ingest, session_maker, source)
         tasks.append(asyncio.create_task(ingest.run_forever()))
 
     if role in (Role.CLASSIFIER, Role.ALL):
@@ -52,6 +54,9 @@ def _background_coroutines(app: FastAPI) -> list[asyncio.Task[None]]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings: AppSettings = app.state.settings
+    if settings.server.auto_migrate:
+        await apply_schema(app.state.engine)
     tasks = _background_coroutines(app)
     try:
         yield
@@ -80,6 +85,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
     Instrumentator(should_instrument_requests_inprogress=True).instrument(app).expose(app, include_in_schema=False)
     app.include_router(health_router)
+    if app_settings.server.expose_internal_stats:
+        app.include_router(internal_router)
     if app_settings.role in (Role.API, Role.ALL):
         app.include_router(v1_router)
     return app

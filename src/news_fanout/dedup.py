@@ -29,9 +29,26 @@ class PushDedupStore:
             return set()
         pipeline = self._client.pipeline(transaction=False)
         for user_id in user_ids:
-            pipeline.set(f"{self._key_prefix}:{dedup_key}:{user_id}", "1", nx=True, ex=self._ttl_seconds)
+            pipeline.set(self._key(dedup_key, user_id), "1", nx=True, ex=self._ttl_seconds)
         results: list[Any] = await pipeline.execute()
         return {user_id for user_id, acquired in zip(user_ids, results, strict=True) if acquired}
+
+    async def release(self, user_ids: Sequence[str], dedup_key: str) -> None:
+        """Drop claims so a failed batch can be retried.
+
+        Without this, a send that raises after `claim` succeeded would leave the
+        markers in place and the retry would silently skip those users until the
+        TTL expired.
+        """
+        if not user_ids:
+            return
+        await self._client.delete(*(self._key(dedup_key, user_id) for user_id in user_ids))
+
+    async def ping(self) -> bool:
+        return bool(await self._client.ping())
+
+    def _key(self, dedup_key: str, user_id: str) -> str:
+        return f"{self._key_prefix}:{dedup_key}:{user_id}"
 
     async def close(self) -> None:
         await self._client.aclose()

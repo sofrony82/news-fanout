@@ -12,11 +12,10 @@ dependencies = [
     "redis==5.0.8",
     "sqlalchemy[asyncio]~=2.0.48",
     "uvicorn==0.49.0",
-    "logging-helpers",
 ]
 
-[tool.uv.sources]
-logging-helpers = { workspace = true }
+[project.scripts]
+news-fanout = "news_fanout.main:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -24,3 +23,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/news_fanout"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/news_fanout/schema.sql" = "news_fanout/schema.sql"

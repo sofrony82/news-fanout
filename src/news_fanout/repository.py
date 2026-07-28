@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from datetime import datetime, timedelta
+from typing import Any
 
 from sqlalchemy import Row, and_, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -11,6 +12,7 @@ from news_fanout.models import (
     ClaimedClassifyJob,
     ClaimedPushPageJob,
     DueSource,
+    PipelineStats,
     PushPageSpec,
     PushTarget,
     RawArticle,
@@ -569,3 +571,51 @@ async def prune_device_tokens(session: AsyncSession, tokens: Sequence[str]) -> N
     if not tokens:
         return
     await session.execute(update(User).where(User.device_token.in_(tokens)).values(device_token=None))
+
+
+async def ping(session: AsyncSession) -> None:
+    await session.execute(select(1))
+
+
+async def _count(session: AsyncSession, entity: type, *criteria: Any) -> int:
+    stmt = select(func.count()).select_from(entity)
+    if criteria:
+        stmt = stmt.where(*criteria)
+    return (await session.execute(stmt)).scalar_one()
+
+
+async def _count_by_status(session: AsyncSession, entity: type) -> dict[str, int]:
+    stmt = select(entity.status, func.count()).group_by(entity.status)
+    return {status: count for status, count in (await session.execute(stmt)).all()}
+
+
+async def collect_stats(session: AsyncSession) -> PipelineStats:
+    """Counters across the whole pipeline.
+
+    Exposed over HTTP so the end-to-end test can assert that ingest, classification
+    and the digest push pipeline actually made progress — none of which is visible
+    through the user-facing endpoints.
+    """
+    digest_rows = (
+        await session.execute(
+            select(TopicDigestState.topic_id, TopicDigestState.last_pushed_post_id).order_by(
+                TopicDigestState.topic_id
+            )
+        )
+    ).all()
+    max_post_id = (await session.execute(select(func.coalesce(func.max(ArticleByTopic.post_id), 0)))).scalar_one()
+
+    return PipelineStats(
+        topics=await _count(session, Topic),
+        sources=await _count(session, Source),
+        articles=await _count(session, Article),
+        article_topics=await _count(session, ArticleByTopic),
+        users=await _count(session, User),
+        users_with_device_token=await _count(session, User, User.device_token.is_not(None)),
+        subscriptions=await _count(session, Subscription),
+        feed_offsets=await _count(session, FeedOffset),
+        max_post_id=max_post_id,
+        classify_jobs=await _count_by_status(session, ClassifyJob),
+        push_page_jobs=await _count_by_status(session, PushPageJob),
+        pushed_topics={row.topic_id: row.last_pushed_post_id for row in digest_rows},
+    )

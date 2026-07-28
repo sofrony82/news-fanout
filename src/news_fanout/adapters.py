@@ -28,11 +28,18 @@ class PushSender(Protocol):
 
 
 class StubArticleSource:
-    def __init__(self, articles_per_page: int) -> None:
+    def __init__(self, articles_per_page: int, max_page_id: int = 0) -> None:
         self._articles_per_page = articles_per_page
+        self._max_page_id = max_page_id
 
     async def get_articles(self, source_id: str, page_id_from: int, limit: int) -> ArticlePage:
         count = min(limit, self._articles_per_page)
+        if self._max_page_id > 0:
+            # Stop generating once the synthetic feed is exhausted, so an
+            # always-on deployment does not grow without bound.
+            count = max(0, min(count, self._max_page_id - page_id_from))
+        if count == 0:
+            return ArticlePage(page_id_from=page_id_from, page_id_to=page_id_from, articles=[])
         now = datetime.now(timezone.utc)
         articles = [
             RawArticle(

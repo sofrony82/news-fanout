@@ -178,10 +178,16 @@ class DigestDispatcher:
             cursor = targets[-1].user_id
             fresh_user_ids = await self._dedup_store.claim([target.user_id for target in targets], dedup_key)
 
-            tokens = [target.device_token for target in targets if target.user_id in fresh_user_ids]
-            if tokens:
-                await self._rate_limiter.acquire(len(tokens))
-                result = await self._sender.send_multicast(tokens, message)
+            batch = [target for target in targets if target.user_id in fresh_user_ids]
+            if batch:
+                await self._rate_limiter.acquire(len(batch))
+                try:
+                    result = await self._sender.send_multicast([target.device_token for target in batch], message)
+                except Exception:
+                    # Give the claims back before bubbling up, otherwise the job
+                    # retry would treat these users as already notified.
+                    await self._dedup_store.release([target.user_id for target in batch], dedup_key)
+                    raise
                 sent += result.sent
                 if result.invalid_tokens:
                     async with self._session_maker() as session:

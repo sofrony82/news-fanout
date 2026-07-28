@@ -1,0 +1,78 @@
+# Deployed stack for the single Compute Engine VM.
+#
+# Differences from docker-compose.yml:
+#   - the app image is pulled from Artifact Registry instead of built locally
+#   - Postgres and Redis are not published to the host (container network only)
+#   - the app port is published so the VM's own firewall rule is the only gate
+#   - secrets come from the .env file that deploy/gcp-deploy.sh writes on the VM
+#   - the synthetic ingest feed is bounded so the boot disk cannot fill
+#
+# Managed by deploy/gcp-deploy.sh; on the VM it lives at /opt/news-fanout/.
+
+name: news-fanout
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: news_fanout
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d news_fanout"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-ttl"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  app:
+    image: ${APP_IMAGE:?APP_IMAGE is required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NEWS_FANOUT_ROLE: all
+      NEWS_FANOUT_DATABASE__HOST: postgres
+      NEWS_FANOUT_DATABASE__PASSWORD: ${POSTGRES_PASSWORD}
+      NEWS_FANOUT_REDIS__HOST: redis
+      NEWS_FANOUT_PUSH__DIGEST_INTERVAL_SECONDS: "60"
+      # Cap the synthetic article stream: 2 sources x 2000 = ~4k articles, then idle.
+      NEWS_FANOUT_INGEST__STUB_MAX_PAGE_ID: "2000"
+      LOG_FORMAT: json
+      LOG_LEVEL: INFO
+    ports:
+      - "80:8000"
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres-data:

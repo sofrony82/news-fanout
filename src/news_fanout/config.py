@@ -37,6 +37,9 @@ class IngestSettings(BaseModel):
     idle_interval_seconds: float = 5.0
     sources_per_cycle: int = 10
     articles_per_page: int = 25
+    # Upper bound on the synthetic feed the stub source generates, per source.
+    # 0 means unlimited; set it in deployments so a demo box cannot fill its disk.
+    stub_max_page_id: int = 0
 
 
 class ClassifierSettings(BaseModel):
@@ -70,6 +73,15 @@ class SearchSettings(BaseModel):
     max_page_size: int = 200
 
 
+class ServerSettings(BaseModel):
+    host: str = "0.0.0.0"
+    port: int = 8000
+    # Apply schema.sql on startup. Safe to leave on: the script is idempotent and
+    # guarded by an advisory lock. Turn it off if migrations are run as a separate step.
+    auto_migrate: bool = True
+    expose_internal_stats: bool = True
+
+
 class AppSettings(BaseSettings):
     role: Role = Role.ALL
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
@@ -78,6 +90,7 @@ class AppSettings(BaseSettings):
     classifier: ClassifierSettings = Field(default_factory=ClassifierSettings)
     push: PushSettings = Field(default_factory=PushSettings)
     search: SearchSettings = Field(default_factory=SearchSettings)
+    server: ServerSettings = Field(default_factory=ServerSettings)
 
     model_config = SettingsConfigDict(
         env_prefix="NEWS_FANOUT_",

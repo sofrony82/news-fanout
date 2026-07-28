@@ -122,3 +122,24 @@ class SubscriptionsResponse(BaseModel):
 
 class DeviceRequest(BaseModel):
     device_token: str
+
+
+class PipelineStats(BaseModel):
+    topics: int
+    sources: int
+    articles: int
+    article_topics: int
+    users: int
+    users_with_device_token: int
+    subscriptions: int
+    feed_offsets: int
+    max_post_id: int
+    classify_jobs: dict[str, int]
+    push_page_jobs: dict[str, int]
+    pushed_topics: dict[str, int]
+
+
+class ReadyResponse(BaseModel):
+    ready: bool
+    database: bool
+    redis: bool

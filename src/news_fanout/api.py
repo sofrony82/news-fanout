@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from typing import Annotated
 
@@ -6,22 +7,23 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from news_fanout import repository
 from news_fanout.config import AppSettings
+from news_fanout.dedup import PushDedupStore
 from news_fanout.models import (
     DeviceRequest,
     FeedAckRequest,
     FeedResponse,
+    PipelineStats,
+    ReadyResponse,
     SearchResponse,
     SubscriptionsResponse,
     TopicsRequest,
 )
 
+logger = logging.getLogger(__name__)
+
 health_router = APIRouter(tags=["health"])
+internal_router = APIRouter(tags=["internal"], prefix="/internal")
 v1_router = APIRouter(tags=["v1"], prefix="/v1")
-
-
-@health_router.get("/healthz", status_code=status.HTTP_200_OK)
-async def health_check() -> Response:
-    return Response()
 
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -37,6 +39,45 @@ def get_settings(request: Request) -> AppSettings:
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 SettingsDep = Annotated[AppSettings, Depends(get_settings)]
+
+
+@health_router.get("/healthz", status_code=status.HTTP_200_OK)
+async def health_check() -> Response:
+    """Liveness: the process is up. Deliberately touches no dependency."""
+    return Response()
+
+
+@health_router.get("/readyz", response_model=ReadyResponse)
+async def readiness_check(request: Request, response: Response) -> ReadyResponse:
+    """Readiness: dependencies are reachable and the schema is applied."""
+    session_maker: async_sessionmaker[AsyncSession] = request.app.state.session_maker
+    dedup_store: PushDedupStore = request.app.state.dedup_store
+
+    database_ok = False
+    try:
+        async with session_maker() as session:
+            await repository.ping(session)
+            await repository.list_topic_ids(session)
+        database_ok = True
+    except Exception:
+        logger.warning("readiness: database check failed", exc_info=True)
+
+    redis_ok = False
+    try:
+        redis_ok = await dedup_store.ping()
+    except Exception:
+        logger.warning("readiness: redis check failed", exc_info=True)
+
+    ready = database_ok and redis_ok
+    if not ready:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return ReadyResponse(ready=ready, database=database_ok, redis=redis_ok)
+
+
+@internal_router.get("/stats", response_model=PipelineStats)
+async def pipeline_stats(session: SessionDep) -> PipelineStats:
+    """Pipeline counters. Not user-facing — see DEPLOY.md on keeping this private."""
+    return await repository.collect_stats(session)
 
 
 async def get_current_user(
