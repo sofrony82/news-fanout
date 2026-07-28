@@ -62,6 +62,21 @@ ok()    { printf '    \033[32m✓\033[0m %s\n' "$*"; }
 warn()  { printf '    \033[33m!\033[0m %s\n' "$*"; }
 die()   { printf '\n\033[31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# ------------------------------------------------------------------- helpers
+
+# 48 hex chars from a single process. Any `... | head -c N` form would SIGPIPE the
+# writer once head closed the pipe, and pipefail would abort the script silently.
+generate_password() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 24
+    else
+        python3 -c 'import secrets; print(secrets.token_hex(24))'
+    fi
+}
+
+# First line of stdin, without the early pipe close that `head -1` performs.
+first_line() { sed -n '1p'; }
+
 # --------------------------------------------------------------- prerequisites
 
 step "Checking prerequisites"
@@ -72,7 +87,7 @@ docker buildx version >/dev/null 2>&1 || die "docker buildx not available; it is
 docker info >/dev/null 2>&1 || die "docker daemon is not responding. Is OrbStack running?"
 ok "gcloud, docker and buildx present"
 
-ACTIVE_ACCOUNT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | head -1)"
+ACTIVE_ACCOUNT="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null | first_line)"
 [ -n "$ACTIVE_ACCOUNT" ] || die "no active gcloud account. Run: gcloud auth login"
 ok "authenticated as $ACTIVE_ACCOUNT"
 
@@ -93,7 +108,9 @@ if [ -z "$POSTGRES_PASSWORD" ]; then
         POSTGRES_PASSWORD="$(cat "$PASSWORD_FILE")"
         info "reusing stored Postgres password ($PASSWORD_FILE)"
     else
-        POSTGRES_PASSWORD="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)"
+        # No pipe into `head` here: head closing the pipe would SIGPIPE the writer,
+        # and `set -o pipefail` would turn that into a silent fatal exit.
+        POSTGRES_PASSWORD="$(generate_password)"
         printf '%s' "$POSTGRES_PASSWORD" >"$PASSWORD_FILE"
         chmod 600 "$PASSWORD_FILE"
         ok "generated Postgres password, stored in $PASSWORD_FILE"
@@ -104,13 +121,24 @@ fi
 
 if [ "$DO_INFRA" -eq 1 ]; then
     step "Project"
+    # `gcloud projects describe` answers PERMISSION_DENIED both for a project owned by
+    # someone else and for one that does not exist, so it cannot tell those apart.
+    # Only `create` gives an authoritative answer; let its error decide the message.
     if gcloud projects describe "$PROJECT_ID" >/dev/null 2>&1; then
-        ok "project $PROJECT_ID already exists"
+        ok "project $PROJECT_ID already exists and is accessible"
     else
         info "creating project $PROJECT_ID"
-        gcloud projects create "$PROJECT_ID" --name="news-fanout" --quiet \
-            || die "could not create project $PROJECT_ID (the ID may be taken globally)"
-        ok "project created"
+        if CREATE_ERR="$(gcloud projects create "$PROJECT_ID" --name="news-fanout" --quiet 2>&1 >/dev/null)"; then
+            ok "project created"
+        elif printf '%s' "$CREATE_ERR" | grep -qi "already in use\|already exists\|ALREADY_EXISTS"; then
+            die "project ID '$PROJECT_ID' is already in use by another GCP account.
+    Project IDs are globally unique across all of Google Cloud.
+    Set a different PROJECT_ID in deploy/config.env, for example:
+        PROJECT_ID=${PROJECT_ID}-$(LC_ALL=C od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+        else
+            die "could not create project $PROJECT_ID:
+    ${CREATE_ERR}"
+        fi
     fi
 
     step "Billing"
@@ -121,7 +149,7 @@ if [ "$DO_INFRA" -eq 1 ]; then
     else
         if [ -z "$BILLING_ACCOUNT" ]; then
             BILLING_ACCOUNT="$(gcloud billing accounts list \
-                --filter='open=true' --format='value(name)' 2>/dev/null | head -1 | sed 's|billingAccounts/||')"
+                --filter='open=true' --format='value(name)' 2>/dev/null | first_line | sed 's|billingAccounts/||')"
         fi
         [ -n "$BILLING_ACCOUNT" ] || die "no open billing account found. Set BILLING_ACCOUNT in deploy/config.env."
         info "linking billing account $BILLING_ACCOUNT"
